@@ -4,13 +4,14 @@
 #include <array>
 #include <chrono>
 #include <iostream>
+#include <memory>
 
 #include "util/types.hpp"
 #include "Emu/Cell/PPUInterpreter.h"
 
 TEST(PPUInterpreterPerformance, DecodeThroughput)
 {
-	ppu_interpreter_rt decoder;
+	auto decoder = std::make_unique<ppu_interpreter_rt>();
 
 	// A repeatable mix of common PPU instruction encodings. Decode only: no
 	// emulated state is touched and the selected handlers are never executed.
@@ -36,7 +37,7 @@ TEST(PPUInterpreterPerformance, DecodeThroughput)
 
 	for (const u32 opcode : instructions)
 	{
-		EXPECT_NE(decoder.decode(opcode), nullptr);
+		EXPECT_NE(decoder->decode(opcode), nullptr);
 	}
 
 	constexpr u64 iterations = 2'000'000;

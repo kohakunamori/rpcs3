@@ -31,7 +31,8 @@ jobs:
             -WarmupRuns 1 `
             -MeasuredRuns 3 `
             -OutputDirectory "benchmark-results" `
-            -WorkloadName "harness-smoke"
+            -WorkloadName "harness-smoke" `
+            -SuppressComparisonSummary
       - name: Upload smoke-test report
         uses: actions/upload-artifact@v4
         with:

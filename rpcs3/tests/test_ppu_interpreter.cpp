@@ -8,6 +8,9 @@
 
 #include "util/types.hpp"
 #include "Emu/Cell/PPUInterpreter.h"
+#include "Emu/Cell/PPUAnalyser.h"
+
+extern const ppu_decoder<ppu_itype> g_ppu_itype;
 
 TEST(PPUInterpreterPerformance, DecodeThroughput)
 {
@@ -69,4 +72,44 @@ TEST(PPUInterpreterPerformance, DecodeThroughput)
 		<< " decodes/s, checksum=" << checksum << '\n';
 
 	EXPECT_NE(checksum, 0u);
+}
+
+TEST(PPUInterpreterPerformance, SpecialDecodeCoverage)
+{
+	// The PPU type decoder has a 17-bit lookup index. Iterate every entry
+	// and ensure the fast path never skips one of the legacy special cases.
+	for (u32 index = 0; index < 0x20000u; ++index)
+	{
+		const u32 opcode = ((index & 0x3fu) << 26) | (index >> 6);
+		const auto type = g_ppu_itype.decode(opcode);
+		bool handled_specially = false;
+
+		switch (type)
+		{
+		case ppu_itype::LWZ:
+		case ppu_itype::LBZ:
+		case ppu_itype::STW:
+		case ppu_itype::STB:
+		case ppu_itype::LHZ:
+		case ppu_itype::LHA:
+		case ppu_itype::STH:
+		case ppu_itype::LFS:
+		case ppu_itype::LFD:
+		case ppu_itype::STFS:
+		case ppu_itype::STFD:
+		case ppu_itype::VSLDOI:
+		case ppu_itype::MFOCRF:
+			handled_specially = true;
+			break;
+		default:
+			break;
+		}
+
+		if (handled_specially)
+		{
+			ASSERT_TRUE(ppu_interpreter_detail::needs_special_decode(opcode))
+				<< "Uncovered special opcode 0x" << std::hex << opcode
+				<< ", lookup index " << index;
+		}
+	}
 }

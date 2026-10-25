@@ -7861,6 +7861,69 @@ ppu_interpreter_rt::ppu_interpreter_rt() noexcept
 
 ppu_intrp_func_t ppu_interpreter_rt::decode(u32 opv) const noexcept
 {
+	// Most primary opcode families have no special interpreter handling.
+	// Skip the type lookup for them and use the already-built handler table.
+	if (!ppu_interpreter_detail::needs_special_decode(opv))
+	{
+		return table.decode(opv);
+	}
+
+	const auto op = ppu_opcode_t{opv};
+
+	switch (g_ppu_itype.decode(opv))
+	{
+	case ppu_itype::LWZ:
+	case ppu_itype::LBZ:
+	case ppu_itype::STW:
+	case ppu_itype::STB:
+	case ppu_itype::LHZ:
+	case ppu_itype::LHA:
+	case ppu_itype::STH:
+	case ppu_itype::LFS:
+	case ppu_itype::LFD:
+	case ppu_itype::STFS:
+	case ppu_itype::STFD:
+	{
+		// Minor optimization: 16-bit absolute addressing never points to a valid memory
+		if (!op.ra)
+		{
+			return [](ppu_thread&, ppu_opcode_t op, be_t<u32>*, ppu_intrp_func*)
+			{
+				fmt::throw_exception("Invalid instruction: %s r%d,0x%016x(r0)", g_ppu_iname.decode(op.opcode), op.rd, op.simm16);
+			};
+		}
+
+		break;
+	}
+	case ppu_itype::VSLDOI: return ptrs->VSLDOI_[op.vsh];
+	case ppu_itype::MFOCRF:
+	{
+		if (op.l11)
+		{
+			const u32 n = std::countl_zero<u32>(op.crm) & 7;
+
+			if (0x80u >> n != op.crm)
+			{
+				return [](ppu_thread&, ppu_opcode_t op, be_t<u32>*, ppu_intrp_func*)
+				{
+					fmt::throw_exception("Invalid instruction: MFOCRF with bits 0x%x", op.crm);
+				};
+			}
+
+			return ptrs->MFOCRF_[n];
+		}
+
+		return ptrs->MFCR;
+	}
+	default: break;
+	}
+
+	return table.decode(opv);
+}
+
+// Retained temporarily for differential/paired performance testing; not used by emulation.
+ppu_intrp_func_t ppu_interpreter_rt::decode_reference(u32 opv) const noexcept
+{
 	const auto op = ppu_opcode_t{opv};
 
 	switch (g_ppu_itype.decode(opv))

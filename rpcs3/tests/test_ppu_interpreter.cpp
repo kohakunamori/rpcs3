@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <iostream>
@@ -38,22 +39,33 @@ TEST(PPUInterpreterPerformance, DecodeThroughput)
 		EXPECT_NE(decoder.decode(opcode), nullptr);
 	}
 
-	constexpr u64 iterations = 5'000'000;
-	uptr checksum = 0;
-	const auto start = std::chrono::steady_clock::now();
+	constexpr u64 iterations = 2'000'000;
+	constexpr usz sample_count = 7;
+	std::array<double, sample_count> elapsed_samples{};
+	u64 checksum = 0;
 
-	for (u64 i = 0; i < iterations; i++)
+	for (double& sample : elapsed_samples)
 	{
-		checksum += reinterpret_cast<uptr>(decoder.decode(instructions[i & (instructions.size() - 1)]));
+		const auto start = std::chrono::steady_clock::now();
+
+		for (u64 i = 0; i < iterations; i++)
+		{
+			checksum += reinterpret_cast<uptr>(decoder.decode(instructions[i & (instructions.size() - 1)]));
+		}
+
+		sample = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 	}
 
-	const auto elapsed = std::chrono::steady_clock::now() - start;
-	const double seconds = std::chrono::duration<double>(elapsed).count();
-	const double ops_per_second = static_cast<double>(iterations) / seconds;
+	std::sort(elapsed_samples.begin(), elapsed_samples.end());
+	const double median_seconds = elapsed_samples[sample_count / 2];
+	const double median_ops_per_second = static_cast<double>(iterations) / median_seconds;
+	const double fastest_ops_per_second = static_cast<double>(iterations) / elapsed_samples.front();
+	const double slowest_ops_per_second = static_cast<double>(iterations) / elapsed_samples.back();
 
-	std::cerr << "[PERF] PPU interpreter decode: " << iterations
-		<< " decodes in " << seconds << " s (" << ops_per_second << " decodes/s)"
-		<< ", checksum=" << checksum << '\n';
+	std::cerr << "[PERF] PPU interpreter decode: " << iterations << " iterations x " << sample_count
+		<< " samples; median=" << median_ops_per_second << " decodes/s"
+		<< ", range=" << slowest_ops_per_second << ".." << fastest_ops_per_second
+		<< " decodes/s, checksum=" << checksum << '\n';
 
 	EXPECT_NE(checksum, 0u);
 }

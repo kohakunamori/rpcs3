@@ -27,7 +27,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Baseline compilation failed' }
           cl /nologo /std:c++20 /O2 /EHsc /DNDEBUG /DRPCS3_EXPERIMENTAL_RSX_ARRAY_GEOMETRIC_GROWTH /DRPCS3_RSX_ARRAY_GROWTH_DIVISOR=2 /Irpcs3 /Fe:rsx_array_grow50.exe scripts/bench_rsx_array_growth.cpp
           if ($LASTEXITCODE -ne 0) { throw '1.5x compilation failed' }
-          cl /nologo /std:c++20 /O2 /EHsc /DNDEBUG /DRPCS3_EXPERIMENTAL_RSX_ARRAY_GEOMETRIC_GROWTH /DRPCS3_RSX_ARRAY_GROWTH_DIVISOR=4 /Irpcs3 /Fe:rsx_array_grow25.exe scripts/bench_rsx_array_growth.cpp
+          cl /nologo /std:c++20 /O2 /EHsc /DNDEBUG /DRPCS3_EXPERIMENTAL_RSX_ARRAY_GEOMETRIC_GROWTH /Irpcs3 /Fe:rsx_array_grow25.exe scripts/bench_rsx_array_growth.cpp
           if ($LASTEXITCODE -ne 0) { throw '1.25x compilation failed' }
           cl /nologo /std:c++20 /O2 /EHsc /DNDEBUG /DRPCS3_EXPERIMENTAL_RSX_ARRAY_GEOMETRIC_GROWTH /DRPCS3_RSX_ARRAY_GROWTH_DIVISOR=8 /Irpcs3 /Fe:rsx_array_grow125.exe scripts/bench_rsx_array_growth.cpp
           if ($LASTEXITCODE -ne 0) { throw '1.125x compilation failed' }

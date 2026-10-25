@@ -70,6 +70,54 @@ namespace rsx
 		EXPECT_TRUE(arr1.empty());
 	}
 
+
+	TEST(SimpleArray, LargeAppendSequencePreservesElements)
+	{
+		// Repeated capacity growth must never alter element order or values.
+		// This test runs with both the default 16-slot policy and opt-in policy.
+		rsx::simple_array<u64> arr;
+		std::vector<u64> expected;
+
+		for (u32 i = 0; i < 20000; ++i)
+		{
+			if (i % 3 == 0)
+			{
+				const u64 value = static_cast<u64>(i) * 73;
+				arr.push_back(value);
+				expected.push_back(value);
+			}
+			else if (i % 3 == 1)
+			{
+				arr.push_back(static_cast<u64>(i) * 73);
+				expected.push_back(static_cast<u64>(i) * 73);
+			}
+			else
+			{
+				arr.emplace_back(static_cast<u64>(i) * 73);
+				expected.emplace_back(static_cast<u64>(i) * 73);
+			}
+		}
+
+		ASSERT_EQ(arr.size(), expected.size());
+		ASSERT_GE(arr.capacity(), arr.size());
+		for (u32 i = 0; i < arr.size(); ++i)
+		{
+			EXPECT_EQ(arr[i], expected[i]);
+		}
+
+		arr.clear();
+		for (u32 i = 0; i < 1024; ++i)
+		{
+			arr.push_back(i);
+		}
+
+		ASSERT_EQ(arr.size(), 1024u);
+		for (u32 i = 0; i < arr.size(); ++i)
+		{
+			EXPECT_EQ(arr[i], i);
+		}
+	}
+
 	TEST(SimpleArray, PushBackAndAccess)
 	{
 		rsx::simple_array<int> arr;

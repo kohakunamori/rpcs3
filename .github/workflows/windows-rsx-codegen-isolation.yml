@@ -1,0 +1,81 @@
+name: Windows RSX codegen isolation
+
+on:
+  push:
+    branches: [codex/rsx-array-codegen-isolation]
+    paths:
+      - 'scripts/rsx_codegen_experiment.py'
+      - 'scripts/test_rsx_codegen_experiment.py'
+      - 'scripts/rsx_array_validation.cpp'
+      - 'scripts/run_rsx_array_validation.py'
+      - 'rpcs3/Emu/RSX/Common/simple_array.hpp'
+      - '.github/workflows/windows-rsx-codegen-isolation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    name: ${{ matrix.comparison }}
+    runs-on: windows-2025
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        comparison: [original, both-outlined, candidate-outlined]
+    env:
+      COMPARISON: ${{ matrix.comparison }}
+      BENCH_CXX_FLAGS: '/std:c++20 /O2 /EHsc /DNDEBUG /MD; exact per-variant flags in build-flags.json; batch_scale=128'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Test evidence guards and prepare isolated source patch
+        shell: pwsh
+        run: |
+          python -m unittest discover -s scripts -p test_run_rsx_array_validation.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Result validator failed' }
+          python -m unittest discover -s scripts -p test_rsx_codegen_experiment.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Evidence guard tests failed' }
+          python scripts/rsx_codegen_experiment.py patch --header rpcs3/Emu/RSX/Common/simple_array.hpp --output codegen
+          if ($LASTEXITCODE -ne 0) { throw 'Source patch failed' }
+          Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors | ConvertTo-Json | Set-Content codegen/cpu.json
+      - name: Build paired release and ASan binaries with mandatory assembly evidence
+        shell: pwsh
+        run: |
+          $buildFlags = @{}
+          foreach ($variant in @('baseline', 'candidate')) {
+            $defs = @()
+            if ($variant -eq 'candidate') { $defs += '/DRPCS3_EXPERIMENTAL_RSX_ARRAY_GEOMETRIC_GROWTH' }
+            $outline = ($env:COMPARISON -eq 'both-outlined') -or (($env:COMPARISON -eq 'candidate-outlined') -and ($variant -eq 'candidate'))
+            if ($outline) { $defs += '/DRPCS3_EXPERIMENTAL_RSX_ARRAY_OUTLINE_GROWTH' }
+            $flags = @('/std:c++20', '/O2', '/EHsc', '/DNDEBUG', '/MD', '/Irpcs3', '/FAsu', '/Bv', "/Facodegen/$variant.asm", "/Focodegen/$variant.obj", "/Fecodegen/$variant.exe") + $defs
+            $buildFlags[$variant] = $flags
+            & cl @flags scripts/rsx_array_validation.cpp 2>&1 | Tee-Object "codegen/$variant.build.txt"
+            if ($LASTEXITCODE -ne 0) { throw "Release build failed: $variant" }
+            & cl /std:c++20 /O1 /EHsc /Zi /MD /fsanitize=address /Irpcs3 @defs "/Fecodegen/$variant-asan.exe" "/Focodegen/$variant-asan.obj" "/Fdcodegen/$variant-asan.pdb" scripts/rsx_array_validation.cpp 2>&1 | Tee-Object "codegen/$variant-asan.build.txt"
+            if ($LASTEXITCODE -ne 0) { throw "ASan build failed: $variant" }
+            & "./codegen/$variant-asan.exe" --verify-only 2>&1 | Tee-Object "codegen/$variant-asan-check.txt"
+            if ($LASTEXITCODE -ne 0) { throw "ASan failed: $variant" }
+          }
+          $buildFlags | ConvertTo-Json -Depth 5 | Set-Content codegen/build-flags.json
+          python scripts/rsx_codegen_experiment.py manifest --directory codegen --variants baseline candidate
+          if ($LASTEXITCODE -ne 0) { throw 'Required evidence missing or empty' }
+      - name: Repeat 78 workloads with 128x batches and 12 balanced pairs
+        shell: pwsh
+        run: |
+          python scripts/run_rsx_array_validation.py --baseline codegen/baseline.exe --candidate codegen/candidate.exe --pairs 12 --batch-scale 128 --output results
+          if ($LASTEXITCODE -ne 0) { throw 'Benchmark failed' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rsx-codegen-${{ matrix.comparison }}
+          path: |
+            codegen/
+            results/
+          if-no-files-found: error

@@ -36,8 +36,10 @@ jobs:
           foreach ($variant in @('baseline', 'candidate')) {
             $defs = @()
             if ($variant -eq 'candidate') { $defs += '/DRPCS3_EXPERIMENTAL_RSX_ARRAY_GEOMETRIC_GROWTH' }
-            & cl /std:c++20 /O2 /EHsc /DNDEBUG /MD /Irpcs3 /FAs "/Fa:$variant.asm" @defs "/Fe:rsx-$variant.exe" scripts/rsx_array_validation.cpp
+            & cl /std:c++20 /O2 /EHsc /DNDEBUG /MD /Irpcs3 /FAs "/Fa$variant.asm" @defs "/Fe:rsx-$variant.exe" scripts/rsx_array_validation.cpp
             if ($LASTEXITCODE -ne 0) { throw "Build failed: $variant" }
+            if (-not (Test-Path "$variant.asm" -PathType Leaf)) { throw "Missing assembly listing: $variant" }
+            if ((Get-Item "$variant.asm").Length -eq 0) { throw "Empty assembly listing: $variant" }
           }
       - name: Repeat all 78 workloads with 128x batches and 12 balanced pairs
         shell: pwsh

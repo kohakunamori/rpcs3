@@ -1,0 +1,15 @@
+{
+  "status": "PASS",
+  "samples_checked": 1872,
+  "workloads": 78,
+  "pairs": 12,
+  "batch_scale": 128,
+  "min_median_batch_ms": 14.9593,
+  "checks": [
+    "exact policy/capacity/growth model",
+    "repeats and checksums",
+    "per-process stdout agreement",
+    "all summaries independently recalculated"
+  ],
+  "artifact_sha256": "e1b90493134295756f7ccc339d8d95b152799b9a7df568fc186368c88a9c247f"
+}

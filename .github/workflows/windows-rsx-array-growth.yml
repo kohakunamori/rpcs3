@@ -1,0 +1,99 @@
+name: Windows RSX array growth experiment
+
+on:
+  push:
+    branches:
+      - codex/rsx-array-growth-experiment
+    paths:
+      - 'rpcs3/Emu/RSX/Common/simple_array.hpp'
+      - 'scripts/bench_rsx_array_growth.cpp'
+      - '.github/workflows/windows-rsx-array-growth.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare-growth:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build both configurations from the same actual RPCS3 header
+        shell: pwsh
+        run: |
+          cl /nologo /std:c++20 /O2 /EHsc /DNDEBUG /Irpcs3 /Fe:rsx_array_baseline.exe scripts/bench_rsx_array_growth.cpp
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline MSVC compile failed' }
+          cl /nologo /std:c++20 /O2 /EHsc /DNDEBUG /DRPCS3_EXPERIMENTAL_RSX_ARRAY_GEOMETRIC_GROWTH /Irpcs3 /Fe:rsx_array_candidate.exe scripts/bench_rsx_array_growth.cpp
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate MSVC compile failed' }
+      - name: Run nine alternating A/B pairs with correctness checks
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $variants = @(
+            [pscustomobject]@{ name = 'baseline'; path = '.\rsx_array_baseline.exe' },
+            [pscustomobject]@{ name = 'candidate'; path = '.\rsx_array_candidate.exe' }
+          )
+          $results = [System.Collections.Generic.List[object]]::new()
+          foreach ($variant in $variants) {
+            $null = & $variant.path
+            if ($LASTEXITCODE -ne 0) { throw "Warmup failed for $($variant.name)" }
+          }
+          for ($pair = 1; $pair -le 9; $pair++) {
+            if (($pair % 2) -eq 1) { $order = @($variants[0], $variants[1]) }
+            else { $order = @($variants[1], $variants[0]) }
+            foreach ($variant in $order) {
+              $lines = @(& $variant.path)
+              if ($LASTEXITCODE -ne 0) { throw "Benchmark failed for $($variant.name) pair $pair" }
+              $parsed = @($lines | ConvertFrom-Csv)
+              if ($parsed.Count -ne 12) { throw "Unexpected row count: $($parsed.Count)" }
+              foreach ($row in $parsed) {
+                $results.Add([pscustomobject]@{
+                  pair = $pair
+                  variant = $variant.name
+                  profile = $row.profile
+                  operation = $row.operation
+                  count = [int]$row.count
+                  elapsed_ms = [double]$row.elapsed_ms
+                  capacity = [int]$row.capacity
+                  growth_events = [int]$row.growth_events
+                  checksum = $row.checksum
+                })
+              }
+            }
+          }
+          $results | Export-Csv -Path rsx_array_growth_samples.csv -NoTypeInformation
+          $summary = [System.Collections.Generic.List[object]]::new()
+          foreach ($group in ($results | Group-Object profile, operation)) {
+            $base = @($group.Group | Where-Object variant -eq 'baseline' | Sort-Object elapsed_ms)
+            $cand = @($group.Group | Where-Object variant -eq 'candidate' | Sort-Object elapsed_ms)
+            if ($base.Count -ne 9 -or $cand.Count -ne 9) { throw 'Incomplete benchmark group' }
+            if (@($group.Group | Select-Object -ExpandProperty checksum -Unique).Count -ne 1) {
+              throw "Baseline/candidate checksum mismatch: $($group.Name)"
+            }
+            if ($base[4].elapsed_ms -le 0) { throw 'Invalid zero-duration sample' }
+            $pct = [math]::Round(100 * ($cand[4].elapsed_ms / $base[4].elapsed_ms - 1), 2)
+            $row = [pscustomobject]@{
+              case = $group.Name
+              baseline_median_ms = $base[4].elapsed_ms
+              candidate_median_ms = $cand[4].elapsed_ms
+              change_percent = $pct
+              baseline_capacity = $base[4].capacity
+              candidate_capacity = $cand[4].capacity
+              baseline_growth_events = $base[4].growth_events
+              candidate_growth_events = $cand[4].growth_events
+            }
+            $summary.Add($row)
+          }
+          $summary | Export-Csv -Path rsx_array_growth_summary.csv -NoTypeInformation
+          $summary | Format-Table -AutoSize | Out-String | Tee-Object -FilePath rsx_array_growth_summary.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rsx-array-growth-msvc
+          path: |
+            rsx_array_growth_samples.csv
+            rsx_array_growth_summary.csv
+            rsx_array_growth_summary.txt
+          if-no-files-found: warn

@@ -1,0 +1,42 @@
+name: Windows PPU decoder structural proxy
+
+on:
+  push:
+    branches:
+      - codex/windows-ppu-proxy-microbench
+    paths:
+      - "scripts/ppu_dispatch_proxy_bench.cpp"
+      - "scripts/extract_ppu_fastpath_mask.py"
+      - ".github/workflows/windows-ppu-proxy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-msvc-proxy:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Extract actual production mask and compile lightweight proxy
+        shell: pwsh
+        run: |
+          python scripts/extract_ppu_fastpath_mask.py
+          cl /nologo /std:c++20 /O2 /EHsc /I. /Fe:ppu_proxy_windows.exe scripts/ppu_dispatch_proxy_bench.cpp
+          if ($LASTEXITCODE -ne 0) { throw "MSVC compilation failed" }
+      - name: Run paired structural lookup comparison
+        shell: pwsh
+        run: |
+          .\ppu_proxy_windows.exe 2>&1 | Tee-Object -FilePath ppu_proxy_windows_summary.txt
+          if ($LASTEXITCODE -ne 0) { throw "Proxy benchmark or equivalence test failed" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ppu-structural-proxy-msvc
+          path: |
+            ppu_proxy_windows_samples.csv
+            ppu_proxy_windows_summary.txt
+          if-no-files-found: error

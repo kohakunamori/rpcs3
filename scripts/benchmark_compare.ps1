@@ -13,7 +13,9 @@ param(
 
     [string]$OutputDirectory = ".\benchmark-results",
 
-    [string]$WorkloadName = "custom"
+    [string]$WorkloadName = "custom",
+
+    [switch]$SuppressComparisonSummary
 )
 
 $ErrorActionPreference = "Stop"
@@ -59,21 +61,39 @@ function ConvertTo-WindowsCommandLineArgument {
     return $builder.ToString()
 }
 
+function Get-ExecutableMetadata {
+    param([string]$Executable)
+
+    if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
+        throw "Executable not found: $Executable"
+    }
+
+    $resolved = (Resolve-Path -LiteralPath $Executable).Path
+    $file = Get-Item -LiteralPath $resolved
+    $hash = (Get-FileHash -LiteralPath $resolved -Algorithm SHA256).Hash
+
+    return [pscustomobject]@{
+        path = $resolved
+        length_bytes = $file.Length
+        sha256 = $hash
+        file_version = $file.VersionInfo.FileVersion
+        product_version = $file.VersionInfo.ProductVersion
+    }
+}
+
 function Invoke-TimedRun {
     param(
         [string]$Label,
         [string]$Executable,
         [string[]]$Arguments,
         [int]$RunNumber,
+        [int]$PairNumber,
         [bool]$IsWarmup
     )
 
-    if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
-        throw "Executable not found: $Executable"
-    }
-
+    $resolved = (Resolve-Path -LiteralPath $Executable).Path
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = (Resolve-Path -LiteralPath $Executable).Path
+    $startInfo.FileName = $resolved
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $startInfo.Arguments = (($Arguments | ForEach-Object {
@@ -92,9 +112,10 @@ function Invoke-TimedRun {
     $row = [pscustomobject]@{
         workload = $WorkloadName
         variant = $Label
+        pair = $PairNumber
         run = $RunNumber
         warmup = $IsWarmup
-        executable = $startInfo.FileName
+        executable = $resolved
         elapsed_ms = [math]::Round($timer.Elapsed.TotalMilliseconds, 3)
         exit_code = $process.ExitCode
         cpu_time_ms = [math]::Round($process.TotalProcessorTime.TotalMilliseconds, 3)
@@ -111,48 +132,88 @@ function Invoke-TimedRun {
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $results = [System.Collections.Generic.List[object]]::new()
+$variants = @(
+    [pscustomobject]@{ Name = "baseline"; Executable = $BaselineExecutable },
+    [pscustomobject]@{ Name = "candidate"; Executable = $CandidateExecutable }
+)
 
-foreach ($variant in @(
-    @{ Name = "baseline"; Executable = $BaselineExecutable },
-    @{ Name = "candidate"; Executable = $CandidateExecutable }
-)) {
+# Resolve and hash binaries before measuring so reports identify the exact inputs.
+$binaryMetadata = @{}
+foreach ($variant in $variants) {
+    $binaryMetadata[$variant.Name] = Get-ExecutableMetadata -Executable $variant.Executable
+}
+
+# Warm both binaries before measured pairs.
+foreach ($variant in $variants) {
     for ($i = 1; $i -le $WarmupRuns; $i++) {
-        $null = Invoke-TimedRun -Label $variant.Name -Executable $variant.Executable -Arguments $ArgumentList -RunNumber $i -IsWarmup $true
+        $null = Invoke-TimedRun -Label $variant.Name -Executable $variant.Executable -Arguments $ArgumentList -RunNumber $i -PairNumber 0 -IsWarmup $true
     }
-    for ($i = 1; $i -le $MeasuredRuns; $i++) {
-        $results.Add((Invoke-TimedRun -Label $variant.Name -Executable $variant.Executable -Arguments $ArgumentList -RunNumber $i -IsWarmup $false))
+}
+
+# Alternate order each pair to reduce systematic bias from thermal/power drift.
+for ($pair = 1; $pair -le $MeasuredRuns; $pair++) {
+    if ($pair % 2 -eq 1) {
+        $order = @($variants[0], $variants[1])
+    } else {
+        $order = @($variants[1], $variants[0])
+    }
+
+    foreach ($variant in $order) {
+        $results.Add((Invoke-TimedRun -Label $variant.Name -Executable $variant.Executable -Arguments $ArgumentList -RunNumber $pair -PairNumber $pair -IsWarmup $false))
     }
 }
 
 $csvPath = Join-Path $OutputDirectory "$WorkloadName-$timestamp.csv"
 $jsonPath = Join-Path $OutputDirectory "$WorkloadName-$timestamp.json"
+$metadataPath = Join-Path $OutputDirectory "$WorkloadName-$timestamp-metadata.json"
 $results | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding utf8
+
+$metadata = [pscustomobject]@{
+    timestamp_utc = [DateTime]::UtcNow.ToString("o")
+    workload = $WorkloadName
+    arguments = $ArgumentList
+    warmup_runs_per_variant = $WarmupRuns
+    measured_pairs = $MeasuredRuns
+    pair_order = "Alternating baseline/candidate order by pair number"
+    powershell_version = $PSVersionTable.PSVersion.ToString()
+    os_version = [Environment]::OSVersion.VersionString
+    processor_identifier = $env:PROCESSOR_IDENTIFIER
+    logical_processor_count = [Environment]::ProcessorCount
+    baseline = $binaryMetadata["baseline"]
+    candidate = $binaryMetadata["candidate"]
+    notes = "Process-level measurements only. This is not an in-game FPS benchmark."
+}
+$metadata | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $metadataPath -Encoding utf8
 $results | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $jsonPath -Encoding utf8
 
-$summary = foreach ($variantName in @("baseline", "candidate")) {
-    $samples = @($results | Where-Object { $_.variant -eq $variantName } | ForEach-Object { [double]$_.elapsed_ms } | Sort-Object)
-    $median = if ($samples.Count % 2) {
-        $samples[[int][math]::Floor($samples.Count / 2)]
-    } else {
-        ($samples[$samples.Count / 2 - 1] + $samples[$samples.Count / 2]) / 2
+if (-not $SuppressComparisonSummary) {
+    $summary = foreach ($variantName in @("baseline", "candidate")) {
+        $samples = @($results | Where-Object { $_.variant -eq $variantName } | ForEach-Object { [double]$_.elapsed_ms } | Sort-Object)
+        $median = if ($samples.Count % 2) {
+            $samples[[int][math]::Floor($samples.Count / 2)]
+        } else {
+            ($samples[$samples.Count / 2 - 1] + $samples[$samples.Count / 2]) / 2
+        }
+        [pscustomobject]@{
+            variant = $variantName
+            runs = $samples.Count
+            median_elapsed_ms = [math]::Round($median, 3)
+            min_elapsed_ms = $samples[0]
+            max_elapsed_ms = $samples[-1]
+        }
     }
-    [pscustomobject]@{
-        variant = $variantName
-        runs = $samples.Count
-        median_elapsed_ms = [math]::Round($median, 3)
-        min_elapsed_ms = $samples[0]
-        max_elapsed_ms = $samples[-1]
-    }
+
+    $baselineMedian = [double]($summary | Where-Object variant -eq "baseline").median_elapsed_ms
+    $candidateMedian = [double]($summary | Where-Object variant -eq "candidate").median_elapsed_ms
+    $changePercent = if ($baselineMedian -gt 0) {
+        [math]::Round((($candidateMedian - $baselineMedian) / $baselineMedian) * 100, 2)
+    } else { $null }
+
+    Write-Host ""
+    $summary | Format-Table -AutoSize
+    Write-Host "Candidate median change: $changePercent% (negative is faster)"
 }
 
-$baselineMedian = [double]($summary | Where-Object variant -eq "baseline").median_elapsed_ms
-$candidateMedian = [double]($summary | Where-Object variant -eq "candidate").median_elapsed_ms
-$changePercent = if ($baselineMedian -gt 0) {
-    [math]::Round((($candidateMedian - $baselineMedian) / $baselineMedian) * 100, 2)
-} else { $null }
-
-Write-Host ""
-$summary | Format-Table -AutoSize
-Write-Host "Candidate median change: $changePercent% (negative is faster)"
-Write-Host "CSV:  $csvPath"
-Write-Host "JSON: $jsonPath"
+Write-Host "CSV:      $csvPath"
+Write-Host "JSON:     $jsonPath"
+Write-Host "Metadata: $metadataPath"

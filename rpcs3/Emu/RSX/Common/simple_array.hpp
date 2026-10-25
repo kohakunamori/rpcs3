@@ -200,8 +200,14 @@ namespace rsx
 		void grow_for_append()
 		{
 #ifdef RPCS3_EXPERIMENTAL_RSX_ARRAY_GEOMETRIC_GROWTH
+#ifndef RPCS3_RSX_ARRAY_GROWTH_DIVISOR
+#define RPCS3_RSX_ARRAY_GROWTH_DIVISOR 2
+#endif
+			// Compare 1.5x, 1.25x and 1.125x append growth without changing
+			// the default allocator behavior or the public reserve() contract.
+			static_assert(RPCS3_RSX_ARRAY_GROWTH_DIVISOR >= 2);
 			const u32 new_capacity = _capacity <= 0x7fffffffu
-				? std::max<u32>(_capacity + 16, _capacity + (_capacity / 2))
+				? std::max<u32>(_capacity + 16, _capacity + (_capacity / RPCS3_RSX_ARRAY_GROWTH_DIVISOR))
 				: _capacity + 16;
 			reserve(new_capacity);
 #else

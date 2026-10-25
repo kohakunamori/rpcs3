@@ -51,7 +51,7 @@ TEST(PPUInterpreterPerformance, DecodeThroughput)
 
 		for (u64 i = 0; i < iterations; i++)
 		{
-			checksum += reinterpret_cast<uptr>(decoder.decode(instructions[i & (instructions.size() - 1)]));
+			checksum += reinterpret_cast<uptr>(decoder->decode(instructions[i & (instructions.size() - 1)]));
 		}
 
 		sample = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();

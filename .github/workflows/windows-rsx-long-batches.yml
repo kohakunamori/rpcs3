@@ -1,0 +1,56 @@
+name: Windows RSX longer-batch comparison
+
+on:
+  push:
+    branches: [codex/rsx-array-long-batches]
+    paths:
+      - 'scripts/rsx_array_validation.cpp'
+      - 'scripts/run_rsx_array_validation.py'
+      - 'scripts/test_run_rsx_array_validation.py'
+      - '.github/workflows/windows-rsx-long-batches.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    env:
+      BENCH_CXX_FLAGS: '/std:c++20 /O2 /EHsc /DNDEBUG /MD; candidate additionally defines RPCS3_EXPERIMENTAL_RSX_ARRAY_GEOMETRIC_GROWTH; batch_scale=128'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Verify runner and build both policies with assembly listings
+        shell: pwsh
+        run: |
+          python -m unittest discover -s scripts -p test_run_rsx_array_validation.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Result validator failed' }
+          Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors | ConvertTo-Json | Set-Content cpu.json
+          foreach ($variant in @('baseline', 'candidate')) {
+            $defs = @()
+            if ($variant -eq 'candidate') { $defs += '/DRPCS3_EXPERIMENTAL_RSX_ARRAY_GEOMETRIC_GROWTH' }
+            & cl /std:c++20 /O2 /EHsc /DNDEBUG /MD /Irpcs3 /FAs "/Fa:$variant.asm" @defs "/Fe:rsx-$variant.exe" scripts/rsx_array_validation.cpp
+            if ($LASTEXITCODE -ne 0) { throw "Build failed: $variant" }
+          }
+      - name: Repeat all 78 workloads with 128x batches and 12 balanced pairs
+        shell: pwsh
+        run: |
+          python scripts/run_rsx_array_validation.py --baseline rsx-baseline.exe --candidate rsx-candidate.exe --pairs 12 --batch-scale 128 --output rsx-long-batch-results
+          if ($LASTEXITCODE -ne 0) { throw 'Long-batch benchmark failed' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rsx-long-batch-results
+          path: |
+            rsx-long-batch-results/
+            baseline.asm
+            candidate.asm
+            cpu.json
+          if-no-files-found: error

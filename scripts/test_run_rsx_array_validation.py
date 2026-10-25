@@ -6,10 +6,10 @@ import unittest
 import run_rsx_array_validation as bench
 
 
-def fixture(policy="baseline"):
+def fixture(policy="baseline", batch_scale=1):
     rows = []
     for t, mode, n in sorted(bench.CASES):
-        repeats = max(16, min(32768, 262144 // (n + 1)))
+        repeats = max(16, min(32768, 262144 // (n + 1))) * batch_scale
         rows.append(dict(policy=policy, type=t, mode=mode, count=n, repeats=repeats,
                          elapsed_ms=10, checksum=n * repeats * (n + repeats) // 2,
                          capacity=n, reserved_bytes=n * (8 if t == "u64" else 64), growths=0))
@@ -27,6 +27,18 @@ def encode(rows):
 class ResultsValidation(unittest.TestCase):
     def test_complete(self):
         self.assertEqual(len(bench.parse_samples(encode(fixture()), "baseline")), 78)
+
+    def test_long_batches(self):
+        self.assertEqual(len(bench.parse_samples(encode(fixture(batch_scale=128)), "baseline", 128)), 78)
+
+    def test_wrong_batch_scale(self):
+        with self.assertRaises(ValueError):
+            bench.parse_samples(encode(fixture(batch_scale=128)), "baseline", 64)
+
+    def test_invalid_batch_scale(self):
+        for scale in (0, -1, 1025):
+            with self.assertRaises(ValueError):
+                bench.parse_samples(encode(fixture()), "baseline", scale)
 
     def test_missing_case(self):
         with self.assertRaises(ValueError):

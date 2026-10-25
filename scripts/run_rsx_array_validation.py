@@ -23,7 +23,9 @@ FIELDS = ("policy", "type", "mode", "count", "repeats", "elapsed_ms",
           "checksum", "capacity", "reserved_bytes", "growths")
 
 
-def parse_samples(text: str, policy: str) -> dict:
+def parse_samples(text: str, policy: str, batch_scale: int = 1) -> dict:
+    if not 1 <= batch_scale <= 1024:
+        raise ValueError("Batch scale out of bounds")
     reader = csv.DictReader(io.StringIO(text))
     if tuple(reader.fieldnames or ()) != FIELDS:
         raise ValueError("Unexpected CSV schema")
@@ -42,7 +44,7 @@ def parse_samples(text: str, policy: str) -> dict:
         if not math.isfinite(row["elapsed_ms"]) or row["elapsed_ms"] <= 0:
             raise ValueError("Invalid measured duration")
         n, repeats = row["count"], row["repeats"]
-        if repeats != max(16, min(32768, 262144 // (n + 1))):
+        if repeats != max(16, min(32768, 262144 // (n + 1))) * batch_scale:
             raise ValueError("Unexpected repeat count")
         if row["checksum"] != n * repeats * (n + repeats) // 2:
             raise ValueError("Incorrect workload checksum")
@@ -120,9 +122,12 @@ def binary_info(path: Path) -> dict:
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
-def invoke(executable: Path, argument: str, log: Path) -> str:
+def invoke(executable: Path, argument: str, log: Path, batch_scale: int = 1) -> str:
     try:
-        result = subprocess.run([str(executable), argument], capture_output=True,
+        command = [str(executable), argument]
+        if argument == "--benchmark":
+            command.append(str(batch_scale))
+        result = subprocess.run(command, capture_output=True,
                                 text=True, timeout=180, check=False)
     except subprocess.TimeoutExpired as error:
         log.with_suffix(".error.txt").write_text(str(error), encoding="utf-8")
@@ -139,10 +144,13 @@ def main() -> int:
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--pairs", type=int, default=12)
+    parser.add_argument("--batch-scale", type=int, default=1)
     parser.add_argument("--output", type=Path, default=Path("rsx-validation-results"))
     args = parser.parse_args()
     if args.pairs < 4 or args.pairs % 2:
         parser.error("--pairs must be even and at least four")
+    if not 1 <= args.batch_scale <= 1024:
+        parser.error("--batch-scale must be between 1 and 1024")
     binaries = {"baseline": args.baseline.resolve(strict=True),
                 "candidate": args.candidate.resolve(strict=True)}
     args.output.mkdir(parents=True, exist_ok=True)
@@ -156,7 +164,7 @@ def main() -> int:
                 "runner_image": os.environ.get("ImageVersion"),
                 "compiler_flags": os.environ.get("BENCH_CXX_FLAGS"),
                 "binaries": {k: binary_info(v) for k, v in binaries.items()},
-                "pairs": args.pairs, "order": "AB then BA, balanced",
+                "pairs": args.pairs, "batch_scale": args.batch_scale, "order": "AB then BA, balanced",
                 "scope": "Container construction/fill/consume; not emulator FPS or peak RSS",
                 "status": "running"}
     meta_path = args.output / "metadata.json"
@@ -168,14 +176,13 @@ def main() -> int:
             checks = invoke(path, "--verify-only", logs / (variant + "-verify"))
             if f"PASS boundary/content/alignment checks policy={policy}" not in checks:
                 raise RuntimeError("Policy verification result absent")
-            parse_samples(invoke(path, "--benchmark", logs / (variant + "-warmup")), policy)
+            parse_samples(invoke(path, "--benchmark", logs / (variant + "-warmup"), args.batch_scale), policy, args.batch_scale)
         for pair in range(args.pairs):
             order = ("baseline", "candidate") if pair % 2 == 0 else ("candidate", "baseline")
             for variant in order:
-                text = invoke(binaries[variant], "--benchmark", logs / f"{pair:02d}-{variant}")
-                samples = parse_samples(text, "baseline" if variant == "baseline" else "grow25")
+                text = invoke(binaries[variant], "--benchmark", logs / f"{pair:02d}-{variant}", args.batch_scale)
+                samples = parse_samples(text, "baseline" if variant == "baseline" else "grow25", args.batch_scale)
                 rows.extend(dict(pair=pair, variant=variant, **sample) for sample in samples.values())
-            # Preserve raw completed pairs even if a later process fails.
             write_csv(args.output / "samples.csv", rows)
         summary = summarize(rows, args.pairs)
         write_csv(args.output / "summary.csv", summary)

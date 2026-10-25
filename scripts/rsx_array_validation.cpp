@@ -165,9 +165,9 @@ namespace
 		return result;
 	}
 
-	template <typename T> void benchmark(const char* type, u32 count, const std::string& mode)
+	template <typename T> void benchmark(const char* type, u32 count, const std::string& mode, u32 batch_scale)
 	{
-		const u32 repeats = std::clamp<u32>(262144 / (count + 1), 16, 32768);
+		const u32 repeats = std::clamp<u32>(262144 / (count + 1), 16, 32768) * batch_scale;
 		rsx::simple_array<T> reusable;
 		if (mode == "reuse") fill(reusable, count, 1);
 		if (mode == "reserved") reusable.reserve(count);
@@ -223,17 +223,26 @@ int main(int argc, char** argv)
 				<< " type_size_cases=" << sizes.size() * 2 << '\n';
 			return 0;
 		}
-		if (argc != 2 || std::string(argv[1]) != "--benchmark")
+		if ((argc != 2 && argc != 3) || std::string(argv[1]) != "--benchmark")
 		{
-			std::cerr << "Usage: rsx_array_validation --verify-only|--benchmark\n";
+			std::cerr << "Usage: rsx_array_validation --verify-only|--benchmark [batch_scale:1..1024]\n";
 			return 2;
+		}
+		u32 batch_scale = 1;
+		if (argc == 3)
+		{
+			const std::string text(argv[2]);
+			require(!text.empty() && text.find_first_not_of("0123456789") == std::string::npos, "Invalid batch scale");
+			const unsigned long parsed = std::stoul(text);
+			require(parsed >= 1 && parsed <= 1024, "Batch scale out of bounds");
+			batch_scale = static_cast<u32>(parsed);
 		}
 		std::cout << "policy,type,mode,count,repeats,elapsed_ms,checksum,capacity,reserved_bytes,growths\n";
 		for (u32 count : sizes)
 			for (const std::string mode : {"cold", "reserved", "reuse"})
 			{
-				benchmark<u64>("u64", count, mode);
-				benchmark<record64>("record64", count, mode);
+				benchmark<u64>("u64", count, mode, batch_scale);
+				benchmark<record64>("record64", count, mode, batch_scale);
 			}
 		return 0;
 	}

@@ -58,6 +58,9 @@ struct ppu_interpreter_rt : ppu_interpreter_rt_base
 
 	ppu_intrp_func_t decode(u32 op) const noexcept;
 
+	// Experimental reference path for differential and paired performance tests only.
+	ppu_intrp_func_t decode_reference(u32 op) const noexcept;
+
 private:
 	ppu_decoder<ppu_interpreter_t<ppu_intrp_func_t>, ppu_intrp_func_t> table;
 };

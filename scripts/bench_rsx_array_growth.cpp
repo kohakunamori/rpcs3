@@ -10,6 +10,18 @@
 #include <cstdlib>
 #include <iostream>
 
+// The standalone test does not link the emulator's formatting library.
+// A failed internal allocation invariant is fatal, as it is in RPCS3;
+// successful benchmark paths never call this diagnostic.
+namespace fmt
+{
+	[[noreturn]] void raw_verify_error(std::source_location, const char8_t*, usz)
+	{
+		std::cerr << "RSX array allocation/invariant failure" << std::endl;
+		std::abort();
+	}
+}
+
 namespace
 {
 	struct alignas(16) payload64

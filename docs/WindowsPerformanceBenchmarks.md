@@ -39,3 +39,7 @@ The summary uses median elapsed time and reports candidate change relative to ba
 - The Windows workflow's harness-smoke uses the same no-op command for both variants to validate script operation only. Its timings are not a performance result.
 - The script stops if either measured executable exits with a non-zero code so failed runs are not silently treated as successful measurements.
 - Run a correctness/regression suite separately. Performance numbers alone do not prove semantic equivalence.
+
+## PPU interpreter decode microbenchmark
+
+The Windows unit-test project includes `PPUInterpreterPerformance.DecodeThroughput`. It repeatedly calls the real `ppu_interpreter_rt::decode` method with a fixed mix of instruction encodings and prints decodes/second. It never executes the returned handlers or touches emulated state. Use the printed throughput as a narrow microbenchmark when comparing source revisions built with the same compiler and configuration; it is not representative of a full game or the PPU recompiler path. The benchmark has no timing threshold so noisy CI machines do not fail tests.

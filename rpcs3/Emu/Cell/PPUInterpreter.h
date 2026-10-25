@@ -2,6 +2,25 @@
 
 #include "PPUOpcodes.h"
 
+
+// Only these primary opcode families can select an interpreter handler
+// outside of the regular table (invalid absolute loads/stores, VSLDOI,
+// and MFOCRF). Keep the full type-decoder path for all these families.
+namespace ppu_interpreter_detail
+{
+	constexpr bool needs_special_decode(u32 opcode) noexcept
+	{
+		constexpr u64 special_primary_mask =
+			(1ull << 0x04) | (1ull << 0x1f) |
+			(1ull << 0x20) | (1ull << 0x22) | (1ull << 0x24) |
+			(1ull << 0x26) | (1ull << 0x28) | (1ull << 0x2a) |
+			(1ull << 0x2c) | (1ull << 0x30) | (1ull << 0x32) |
+			(1ull << 0x34) | (1ull << 0x36);
+
+		return (special_primary_mask >> (opcode >> 26)) & 1;
+	}
+}
+
 class ppu_thread;
 
 using ppu_intrp_func_t = void(*)(ppu_thread& ppu_, ppu_opcode_t op, be_t<u32>* this_op, struct ppu_intrp_func* next_fn);

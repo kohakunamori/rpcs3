@@ -7861,6 +7861,13 @@ ppu_interpreter_rt::ppu_interpreter_rt() noexcept
 
 ppu_intrp_func_t ppu_interpreter_rt::decode(u32 opv) const noexcept
 {
+	// Most primary opcode families have no special interpreter handling.
+	// Skip the type lookup for them and use the already-built handler table.
+	if (!ppu_interpreter_detail::needs_special_decode(opv))
+	{
+		return table.decode(opv);
+	}
+
 	const auto op = ppu_opcode_t{opv};
 
 	switch (g_ppu_itype.decode(opv))

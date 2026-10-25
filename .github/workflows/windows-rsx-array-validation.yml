@@ -1,0 +1,147 @@
+name: Windows RSX opt-in validation
+
+on:
+  push:
+    branches: [codex/rsx-array-validation]
+    paths:
+      - 'scripts/rsx_array_validation.cpp'
+      - 'scripts/run_rsx_array_validation.py'
+      - 'scripts/test_run_rsx_array_validation.py'
+      - 'rpcs3/Emu/RSX/Common/simple_array.hpp'
+      - '.github/workflows/windows-rsx-array-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focused:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    env:
+      BENCH_CXX_FLAGS: '/std:c++20 /O2 /EHsc /DNDEBUG /MD; candidate additionally defines RPCS3_EXPERIMENTAL_RSX_ARRAY_GEOMETRIC_GROWTH'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Test result validation and capture toolchain
+        shell: pwsh
+        run: |
+          python -m unittest discover -s scripts -p test_run_rsx_array_validation.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Result-validator tests failed' }
+          Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors | ConvertTo-Json | Set-Content cpu.json
+          cl /Bv 2>&1 | Out-File compiler.txt
+          # cl without source files is intentional here; builds below check exit codes.
+          exit 0
+      - name: Compile release and AddressSanitizer variants
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($variant in @('baseline', 'candidate')) {
+            $defs = @()
+            if ($variant -eq 'candidate') { $defs += '/DRPCS3_EXPERIMENTAL_RSX_ARRAY_GEOMETRIC_GROWTH' }
+            & cl /nologo /std:c++20 /O2 /EHsc /DNDEBUG /MD /Irpcs3 @defs "/Fe:rsx-$variant.exe" scripts/rsx_array_validation.cpp
+            if ($LASTEXITCODE -ne 0) { throw "Release compile failed: $variant" }
+            & cl /nologo /std:c++20 /O2 /EHsc /DNDEBUG /MD /Irpcs3 /fsanitize=address /Zi @defs "/Fe:rsx-$variant-asan.exe" "/Fd:rsx-$variant-asan.pdb" scripts/rsx_array_validation.cpp /link /INCREMENTAL:NO
+            if ($LASTEXITCODE -ne 0) { throw "ASan compile failed: $variant" }
+          }
+      - name: Run memory safety and boundary checks in both policies
+        shell: pwsh
+        run: |
+          foreach ($variant in @('baseline', 'candidate')) {
+            & ".\rsx-$variant-asan.exe" --verify-only 2>&1 | Tee-Object -FilePath "asan-$variant.txt"
+            if ($LASTEXITCODE -ne 0) { throw "ASan/boundary checks failed: $variant" }
+          }
+      - name: Compare cold, pre-reserved and retained small/large arrays
+        shell: pwsh
+        run: |
+          python scripts/run_rsx_array_validation.py --baseline rsx-baseline.exe --candidate rsx-candidate.exe --pairs 12 --output rsx-validation-results
+          if ($LASTEXITCODE -ne 0) { throw 'Workload comparison failed' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rsx-optin-focused-validation
+          path: |
+            rsx-validation-results/
+            asan-*.txt
+            compiler.txt
+            cpu.json
+          if-no-files-found: error
+
+  full-optin:
+    needs: focused
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Append globally to every cl invocation, avoiding mixed-policy TUs.
+      # Do not use ccache for this experiment: no baseline object reuse.
+      _CL_: /DRPCS3_EXPERIMENTAL_RSX_ARRAY_GEOMETRIC_GROWTH
+      BUILD_REPOSITORY_NAME: ${{ github.repository }}
+      BUILD_SOURCEBRANCHNAME: ${{ github.ref_name }}
+      COMPILER: msvc
+      QT_VER_MAIN: '6'
+      QT_VER: '6.12.0'
+      QT_VER_MSVC: 'msvc2022'
+      QT_DATE: '202609280346'
+      LLVM_VER: '22.1.8'
+      VULKAN_VER: '1.4.341.1'
+      VULKAN_SDK_SHA: 'bcf2d75aa9556889ab974858666e20b3655b6055a0db704ccb47279ff33b5bfe'
+      CCACHE_SHA: '859141059ac950e1e8cd042c66f842f26b9e3a62a1669a69fe6ba180cb58bbdf'
+      CCACHE_BIN_DIR: 'C:\ccache_bin'
+      CCACHE_DIR: 'C:\ccache'
+      DEPS_CACHE_DIR: ./dependency_cache
+      SKIP_RPCS3_EXE: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: nuget/setup-nuget@v4
+      - name: Restore test packages
+        run: nuget restore rpcs3.sln
+      - name: Set dependency locations
+        shell: pwsh
+        run: |
+          "QTDIR=C:\Qt\${{ env.QT_VER }}\${{ env.QT_VER_MSVC }}_64" >> $env:GITHUB_ENV
+          "VULKAN_SDK=C:\VulkanSDK\${{ env.VULKAN_VER }}" >> $env:GITHUB_ENV
+      - uses: actions/cache/restore@v4
+        with:
+          path: ./dependency_cache
+          key: "${{ runner.os }}-msvc-${{ env.QT_VER }}-${{ env.VULKAN_SDK_SHA }}-${{ env.CCACHE_SHA }}-${{ hashFiles('llvm.lock') }}"
+      - name: Install upstream-pinned dependencies
+        run: |
+          .ci/setup-windows.sh
+          .ci/setup-windows-ci-vars.sh win64 msvc
+          while IFS='=' read -r key val; do
+            [[ -z "$key" || "$key" =~ ^# ]] && continue
+            echo "$key=$val" >> "$GITHUB_ENV"
+          done < .ci/ci-vars.env
+      - uses: microsoft/setup-msbuild@v2
+      - name: Build emulator libraries and full Windows test executable with opt-in enabled
+        shell: pwsh
+        run: |
+          if ($env:_CL_ -ne '/DRPCS3_EXPERIMENTAL_RSX_ARRAY_GEOMETRIC_GROWTH') { throw 'Policy environment missing' }
+          "commit=$env:GITHUB_SHA`n_CL_=$env:_CL_`nccache=disabled" | Set-Content optin-build-metadata.txt
+          msbuild rpcs3.sln /m:2 /p:Configuration=Release /p:Platform=x64 /p:PreferredToolArchitecture=x64 /p:UseMultiToolTask=true /v:minimal /bl:rsx-optin-build.binlog "/p:CustomAfterMicrosoftCommonTargets=$env:GITHUB_WORKSPACE\buildfiles\msvc\ci_only.targets"
+          if ($LASTEXITCODE -ne 0) { throw 'Full opt-in build failed' }
+      - name: Run full Windows unit test suite
+        shell: pwsh
+        run: |
+          & build\lib\Release-x64\rpcs3_test.exe --gtest_output=xml:rsx-optin-tests.xml 2>&1 | Tee-Object -FilePath rsx-optin-tests.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Opt-in test suite failed' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rsx-full-optin-tests
+          path: |
+            optin-build-metadata.txt
+            rsx-optin-build.binlog
+            rsx-optin-tests.xml
+            rsx-optin-tests.txt
+          if-no-files-found: warn

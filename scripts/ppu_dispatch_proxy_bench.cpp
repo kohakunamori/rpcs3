@@ -59,6 +59,34 @@ namespace
 		return reference(op);
 	}
 
+
+	// Branch-only filter: cheap common-family tests before the fallback.
+	NOINLINE std::uint64_t candidate_branch(u32 op)
+	{
+		const u32 primary = op >> 26;
+		if (primary != 0x04u && primary != 0x1fu &&
+			(primary < 0x20u || (primary & 1u) || primary > 0x36u))
+		{
+			return handler_lookup[decoder_index(op)];
+		}
+		return reference(op);
+	}
+
+	// Switch filter: let MSVC choose an optimal lowering for fixed families.
+	NOINLINE std::uint64_t candidate_switch(u32 op)
+	{
+		switch (op >> 26)
+		{
+		case 0x04: case 0x1f:
+		case 0x20: case 0x22: case 0x24: case 0x26:
+		case 0x28: case 0x2a: case 0x2c:
+		case 0x30: case 0x32: case 0x34: case 0x36:
+			return reference(op);
+		default:
+			return handler_lookup[decoder_index(op)];
+		}
+	}
+
 	void initialize()
 	{
 		for (u32 index = 0; index < entries; ++index)
@@ -81,7 +109,9 @@ namespace
 			for (int j = 0; j < 16; ++j)
 			{
 				const u32 op = base | (rng() & 0x03fff800u);
-				if (reference(op) != candidate(op))
+				if (reference(op) != candidate(op) ||
+				reference(op) != candidate_branch(op) ||
+				reference(op) != candidate_switch(op))
 				{
 					std::cerr << "Synthetic equivalence failed: 0x" << std::hex << op << '\n';
 					std::exit(1);
@@ -124,55 +154,65 @@ namespace
 		return std::chrono::duration<double, std::milli>(end - start).count();
 	}
 
+
 	bool benchmark(const char* profile, bool common_mix, std::ofstream& raw)
 	{
 		const auto ops = make_workload(common_mix);
 		constexpr std::size_t pairs = 9;
-		std::array<double, pairs> reference_times{};
-		std::array<double, pairs> candidate_times{};
-
-		std::uint64_t checksum0 = 0;
-		std::uint64_t checksum1 = 0;
-		measure(ops, reference, checksum0);
-		measure(ops, candidate, checksum1);
-
-		for (std::size_t i = 0; i < pairs; ++i)
+		using fn_t = std::uint64_t(*)(u32);
+		constexpr std::array<const char*, 4> names =
 		{
-			if (i % 2 == 0)
+			"reference", "mask", "branch", "switch"
+		};
+		const std::array<fn_t, 4> functions =
+		{
+			reference, candidate, candidate_branch, candidate_switch
+		};
+		std::array<std::array<double, pairs>, 4> times{};
+		std::array<std::uint64_t, 4> checksums{};
+
+		// Warm each path, rotate trial order on successive pairs.
+		for (std::size_t variant = 0; variant < functions.size(); ++variant)
+			measure(ops, functions[variant], checksums[variant]);
+
+		for (std::size_t pair = 0; pair < pairs; ++pair)
+		{
+			for (std::size_t order = 0; order < functions.size(); ++order)
 			{
-				reference_times[i] = measure(ops, reference, checksum0);
-				candidate_times[i] = measure(ops, candidate, checksum1);
-			}
-			else
-			{
-				candidate_times[i] = measure(ops, candidate, checksum1);
-				reference_times[i] = measure(ops, reference, checksum0);
+				const std::size_t variant = (order + pair) % functions.size();
+				times[variant][pair] = measure(ops, functions[variant], checksums[variant]);
 			}
 
-			if (checksum0 != checksum1)
+			for (std::size_t variant = 1; variant < functions.size(); ++variant)
 			{
-				std::cerr << "Checksum mismatch in " << profile << " pair " << i << '\n';
-				return false;
+				if (checksums[variant] != checksums[0])
+				{
+					std::cerr << "Checksum mismatch for " << names[variant] << " in " << profile << '\n';
+					return false;
+				}
 			}
 
-			raw << profile << ",reference," << i << ',' << reference_times[i] << ',' << checksum0 << '\n';
-			raw << profile << ",candidate," << i << ',' << candidate_times[i] << ',' << checksum1 << '\n';
+			for (std::size_t variant = 0; variant < functions.size(); ++variant)
+				raw << profile << ',' << names[variant] << ',' << pair << ','
+					<< times[variant][pair] << ',' << checksums[variant] << '\n';
 		}
 
-		auto sorted_ref = reference_times;
-		auto sorted_candidate = candidate_times;
-		std::sort(sorted_ref.begin(), sorted_ref.end());
-		std::sort(sorted_candidate.begin(), sorted_candidate.end());
-
-		const double ref_median = sorted_ref[pairs / 2];
-		const double candidate_median = sorted_candidate[pairs / 2];
-		std::cout << std::fixed << std::setprecision(3)
-			<< profile << ": original=" << ref_median
-			<< "ms candidate=" << candidate_median
-			<< "ms change=" << 100.0 * (candidate_median / ref_median - 1.0)
-			<< "% (synthetic proxy, NOT RPCS3 FPS)\n";
+		std::array<double, 4> medians{};
+		for (std::size_t variant = 0; variant < functions.size(); ++variant)
+		{
+			std::sort(times[variant].begin(), times[variant].end());
+			medians[variant] = times[variant][pairs / 2];
+		}
+		std::cout << std::fixed << std::setprecision(3);
+		for (std::size_t variant = 0; variant < functions.size(); ++variant)
+		{
+			std::cout << profile << ": " << names[variant] << "=" << medians[variant]
+				<< "ms change=" << 100.0 * (medians[variant] / medians[0] - 1.0)
+				<< "% (synthetic proxy, NOT RPCS3 FPS)\n";
+		}
 		return true;
 	}
+
 }
 
 int main()

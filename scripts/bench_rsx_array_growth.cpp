@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <random>
+#include <vector>
 
 // The standalone test does not link the emulator's formatting library.
 // A failed internal allocation invariant is fatal, as it is in RPCS3;
@@ -94,10 +96,98 @@ namespace
 			<< growth_events << ',' << checksum << '\n';
 		return true;
 	}
+
+	// Deterministic property-style check on the production container type:
+	// compare mixed operations against std::vector, including transitions
+	// between local and heap storage. Capacity is allowed to vary by policy.
+	bool check_randomized_sequences()
+	{
+		std::mt19937 rng(0x1977aabb);
+		std::uint64_t checks = 0;
+
+		for (int repetition = 0; repetition < 24; ++repetition)
+		{
+			rsx::simple_array<std::uint64_t> actual;
+			std::vector<std::uint64_t> expected;
+
+			for (int step = 0; step < 900; ++step)
+			{
+				const unsigned action = rng() % 8;
+				const std::uint64_t value = rng();
+
+				switch (action)
+				{
+				case 0:
+					actual.push_back(value);
+					expected.push_back(value);
+					break;
+				case 1:
+					actual.push_back(std::uint64_t{value});
+					expected.push_back(value);
+					break;
+				case 2:
+					actual.emplace_back(value);
+					expected.emplace_back(value);
+					break;
+				case 3:
+				{
+					const std::size_t pos = expected.empty() ? 0 : rng() % (expected.size() + 1);
+					actual.insert(actual.begin() + pos, value);
+					expected.insert(expected.begin() + pos, value);
+					break;
+				}
+				case 4:
+					if (!expected.empty())
+					{
+						if (actual.pop_back() != expected.back()) return false;
+						expected.pop_back();
+					}
+					break;
+				case 5:
+					if (step % 37 == 0)
+					{
+						actual.clear();
+						expected.clear();
+					}
+					break;
+				case 6:
+					// Exact reserve remains independent of append growth.
+					actual.reserve(static_cast<u32>(expected.size() + (rng() % 24)));
+					break;
+				case 7:
+				{
+					const rsx::simple_array<std::uint64_t> copied(actual);
+					if (copied.size() != expected.size()) return false;
+					for (std::size_t i = 0; i < expected.size(); ++i)
+						if (copied[static_cast<u32>(i)] != expected[i]) return false;
+					break;
+				}
+				}
+
+				if (actual.size() != expected.size()) return false;
+				if (actual.capacity() < actual.size()) return false;
+				for (std::size_t i = 0; i < expected.size(); ++i)
+				{
+					if (actual[static_cast<u32>(i)] != expected[i]) return false;
+					checks += actual[static_cast<u32>(i)];
+				}
+			}
+		}
+
+		std::cerr << "PASS: randomized sequence correctness, signature=" << checks << '\n';
+		return true;
+	}
+
 }
 
 int main()
 {
+	if (!check_randomized_sequences())
+	{
+		std::cerr << "FAIL: randomized sequence semantics mismatch" << std::endl;
+		return 3;
+	}
+
 	std::cout << "profile,operation,count,elapsed_ms,capacity,growth_events,checksum\n";
 	for (int mode = 0; mode < 3; ++mode)
 	{

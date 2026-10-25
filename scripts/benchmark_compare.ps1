@@ -21,6 +21,44 @@ $ErrorActionPreference = "Stop"
 if ($WarmupRuns -lt 0) { throw "WarmupRuns must be >= 0." }
 if ($MeasuredRuns -lt 1) { throw "MeasuredRuns must be >= 1." }
 
+function ConvertTo-WindowsCommandLineArgument {
+    param([AllowEmptyString()][string]$Value)
+
+    if ($Value -notmatch '[\s"]') {
+        return $Value
+    }
+
+    # Quote according to the Windows C runtime command-line parsing rules.
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.Append('"')
+    $backslashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashes++
+            continue
+        }
+
+        if ($character -eq '"') {
+            [void]$builder.Append(('\' * (2 * $backslashes + 1)))
+            [void]$builder.Append('"')
+            $backslashes = 0
+            continue
+        }
+
+        if ($backslashes -gt 0) {
+            [void]$builder.Append(('\' * $backslashes))
+            $backslashes = 0
+        }
+        [void]$builder.Append($character)
+    }
+
+    if ($backslashes -gt 0) {
+        [void]$builder.Append(('\' * (2 * $backslashes)))
+    }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
 function Invoke-TimedRun {
     param(
         [string]$Label,
@@ -38,9 +76,9 @@ function Invoke-TimedRun {
     $startInfo.FileName = (Resolve-Path -LiteralPath $Executable).Path
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
-    foreach ($argument in $Arguments) {
-        [void]$startInfo.ArgumentList.Add($argument)
-    }
+    $startInfo.Arguments = (($Arguments | ForEach-Object {
+        ConvertTo-WindowsCommandLineArgument -Value $_
+    }) -join ' ')
 
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo

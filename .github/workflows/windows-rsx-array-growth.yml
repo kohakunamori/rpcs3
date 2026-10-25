@@ -1,0 +1,103 @@
+name: Windows RSX array growth experiment
+
+on:
+  push:
+    branches:
+      - codex/rsx-array-growth-experiment
+    paths:
+      - 'rpcs3/Emu/RSX/Common/simple_array.hpp'
+      - 'scripts/bench_rsx_array_growth.cpp'
+      - '.github/workflows/windows-rsx-array-growth.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare-growth:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Compile the real RPCS3 container with four allocation policies
+        shell: pwsh
+        run: |
+          cl /nologo /std:c++20 /O2 /EHsc /DNDEBUG /Irpcs3 /Fe:rsx_array_baseline.exe scripts/bench_rsx_array_growth.cpp
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline compilation failed' }
+          cl /nologo /std:c++20 /O2 /EHsc /DNDEBUG /DRPCS3_EXPERIMENTAL_RSX_ARRAY_GEOMETRIC_GROWTH /DRPCS3_RSX_ARRAY_GROWTH_DIVISOR=2 /Irpcs3 /Fe:rsx_array_grow50.exe scripts/bench_rsx_array_growth.cpp
+          if ($LASTEXITCODE -ne 0) { throw '1.5x compilation failed' }
+          cl /nologo /std:c++20 /O2 /EHsc /DNDEBUG /DRPCS3_EXPERIMENTAL_RSX_ARRAY_GEOMETRIC_GROWTH /Irpcs3 /Fe:rsx_array_grow25.exe scripts/bench_rsx_array_growth.cpp
+          if ($LASTEXITCODE -ne 0) { throw '1.25x compilation failed' }
+          cl /nologo /std:c++20 /O2 /EHsc /DNDEBUG /DRPCS3_EXPERIMENTAL_RSX_ARRAY_GEOMETRIC_GROWTH /DRPCS3_RSX_ARRAY_GROWTH_DIVISOR=8 /Irpcs3 /Fe:rsx_array_grow125.exe scripts/bench_rsx_array_growth.cpp
+          if ($LASTEXITCODE -ne 0) { throw '1.125x compilation failed' }
+      - name: Run nine balanced trials and verify contents
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $variants = @(
+            [pscustomobject]@{ name = 'baseline'; path = '.\rsx_array_baseline.exe' },
+            [pscustomobject]@{ name = 'grow50'; path = '.\rsx_array_grow50.exe' },
+            [pscustomobject]@{ name = 'grow25'; path = '.\rsx_array_grow25.exe' },
+            [pscustomobject]@{ name = 'grow125'; path = '.\rsx_array_grow125.exe' }
+          )
+          $results = [System.Collections.Generic.List[object]]::new()
+          foreach ($variant in $variants) {
+            $null = & $variant.path
+            if ($LASTEXITCODE -ne 0) { throw "Warmup failed for $($variant.name)" }
+          }
+          for ($pair = 1; $pair -le 9; $pair++) {
+            for ($offset = 0; $offset -lt $variants.Count; $offset++) {
+              $variant = $variants[($pair + $offset - 1) % $variants.Count]
+              $lines = @(& $variant.path)
+              if ($LASTEXITCODE -ne 0) { throw "Run failed for $($variant.name), trial $pair" }
+              $parsed = @($lines | ConvertFrom-Csv)
+              if ($parsed.Count -ne 12) { throw "Unexpected row count for $($variant.name): $($parsed.Count)" }
+              foreach ($row in $parsed) {
+                $results.Add([pscustomobject]@{
+                  pair = $pair
+                  variant = $variant.name
+                  profile = $row.profile
+                  operation = $row.operation
+                  count = [int]$row.count
+                  elapsed_ms = [double]$row.elapsed_ms
+                  capacity = [int]$row.capacity
+                  growth_events = [int]$row.growth_events
+                  checksum = $row.checksum
+                })
+              }
+            }
+          }
+          $results | Export-Csv -Path rsx_array_growth_samples.csv -NoTypeInformation
+          $summary = [System.Collections.Generic.List[object]]::new()
+          foreach ($group in ($results | Group-Object profile, operation)) {
+            $baseline = @($group.Group | Where-Object variant -eq 'baseline' | Sort-Object elapsed_ms)
+            if ($baseline.Count -ne 9) { throw 'Missing baseline samples' }
+            if (@($group.Group | Select-Object -ExpandProperty checksum -Unique).Count -ne 1) { throw "Checksum mismatch: $($group.Name)" }
+            foreach ($variant in $variants) {
+              $samples = @($group.Group | Where-Object variant -eq $variant.name | Sort-Object elapsed_ms)
+              if ($samples.Count -ne 9) { throw "Missing samples for $($variant.name)" }
+              if ($baseline[4].elapsed_ms -le 0) { throw 'Invalid baseline duration' }
+              $summary.Add([pscustomobject]@{
+                case = $group.Name
+                variant = $variant.name
+                baseline_median_ms = $baseline[4].elapsed_ms
+                median_ms = $samples[4].elapsed_ms
+                change_percent = [math]::Round(100 * ($samples[4].elapsed_ms / $baseline[4].elapsed_ms - 1), 2)
+                capacity = $samples[4].capacity
+                spare_capacity_percent = [math]::Round(100 * ($samples[4].capacity / $samples[4].count - 1), 1)
+                growth_events = $samples[4].growth_events
+              })
+            }
+          }
+          $summary | Export-Csv -Path rsx_array_growth_summary.csv -NoTypeInformation
+          $summary | Format-Table -AutoSize | Out-String -Width 220 | Tee-Object -FilePath rsx_array_growth_summary.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rsx-array-growth-msvc-variants
+          path: |
+            rsx_array_growth_samples.csv
+            rsx_array_growth_summary.csv
+            rsx_array_growth_summary.txt
+          if-no-files-found: warn

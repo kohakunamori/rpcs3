@@ -194,6 +194,29 @@ namespace rsx
 			std::swap(_size, that._size);
 		}
 
+		// Experimental: grow append-only capacity geometrically, preserving
+		// the existing exact reserve(size) contract and element order.
+		// The default build continues to grow by exactly 16 slots.
+		void grow_for_append()
+		{
+#ifdef RPCS3_EXPERIMENTAL_RSX_ARRAY_GEOMETRIC_GROWTH
+			// A conservative 1.25x append-growth policy by default.
+			// A divisor of 2 or 8 can be selected for comparison builds.
+#ifdef RPCS3_RSX_ARRAY_GROWTH_DIVISOR
+			constexpr u32 growth_divisor = RPCS3_RSX_ARRAY_GROWTH_DIVISOR;
+#else
+			constexpr u32 growth_divisor = 4;
+#endif
+			static_assert(growth_divisor >= 2);
+			const u32 new_capacity = _capacity <= 0x7fffffffu
+				? std::max<u32>(_capacity + 16, _capacity + (_capacity / growth_divisor))
+				: _capacity + 16;
+			reserve(new_capacity);
+#else
+			reserve(_capacity + 16);
+#endif
+		}
+
 		void reserve(u32 size)
 		{
 			if (_capacity >= size)
@@ -228,7 +251,7 @@ namespace rsx
 		{
 			if (_size >= _capacity)
 			{
-				reserve(_capacity + 16);
+				grow_for_append();
 			}
 
 			_data[_size++] = val;
@@ -238,7 +261,7 @@ namespace rsx
 		{
 			if (_size >= _capacity)
 			{
-				reserve(_capacity + 16);
+				grow_for_append();
 			}
 
 			_data[_size++] = val;
@@ -249,7 +272,7 @@ namespace rsx
 		{
 			if (_size >= _capacity)
 			{
-				reserve(_capacity + 16);
+				grow_for_append();
 			}
 
 			std::construct_at(&_data[_size++], std::forward<Args&&>(args)...);
@@ -267,7 +290,7 @@ namespace rsx
 
 			if (_size >= _capacity)
 			{
-				reserve(_capacity + 16);
+				grow_for_append();
 				pos = _data + _loc;
 			}
 
@@ -295,7 +318,7 @@ namespace rsx
 
 			if (_size >= _capacity)
 			{
-				reserve(_capacity + 16);
+				grow_for_append();
 				pos = _data + _loc;
 			}
 
